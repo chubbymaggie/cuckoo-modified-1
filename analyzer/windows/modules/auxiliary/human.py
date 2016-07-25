@@ -51,6 +51,7 @@ def foreach_child(hwnd, lparam):
         "finish",
         "end",
         "allow access",
+        "remind me later",
     ]
 
     # List of buttons labels to not click.
@@ -59,7 +60,8 @@ def foreach_child(hwnd, lparam):
         "don't run",
         "do not ask again until the next update is available",
         "cancel",
-        "do not accept the agreement"
+        "do not accept the agreement",
+        "i would like to help make reader even better"
     ]
 
     classname = create_unicode_buffer(128)
@@ -149,7 +151,7 @@ def get_office_window(hwnd, lparam):
     if USER32.IsWindowVisible(hwnd):
         text = create_unicode_buffer(1024)
         USER32.GetWindowTextW(hwnd, text, 1024)
-        if "- Microsoft" in text.value:
+        if "- Microsoft" in text.value or "- Word" in text.value or "- Excel" in text.value or "- PowerPoint" in text.value:
             # send ALT+F4 equivalent
             log.info("Closing Office window.")
             USER32.SendNotifyMessageW(hwnd, WM_CLOSE, None, None)
@@ -224,7 +226,7 @@ class Human(Auxiliary, Thread):
                     curwind = USER32.GetForegroundWindow()
                     other_hwnds = INITIAL_HWNDS[:]
                     try:
-                        other_hands.remove(USER32.GetForegroundWindow())
+                        other_hwnds.remove(USER32.GetForegroundWindow())
                     except:
                         pass
                     USER32.SetForegroundWindow(other_hwnds[random.randint(0, len(other_hwnds)-1)])

@@ -9,8 +9,9 @@ class PPT(Package):
     PATHS = [
         ("ProgramFiles", "Microsoft Office", "POWERPNT.EXE"),
         ("ProgramFiles", "Microsoft Office", "Office*", "POWERPNT.EXE"),
+        ("ProgramFiles", "Microsoft Office*", "root", "Office*", "POWERPNT.EXE"),
     ]
 
     def start(self, path):
         powerpoint = self.get_path_glob("Microsoft Office PowerPoint")
-        return self.execute(powerpoint, "\"%s\" /s" % path, path)
+        return self.execute(powerpoint, "/s \"%s\"" % path, path)

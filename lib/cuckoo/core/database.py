@@ -12,7 +12,7 @@ from lib.cuckoo.common.constants import CUCKOO_ROOT
 from lib.cuckoo.common.exceptions import CuckooDatabaseError
 from lib.cuckoo.common.exceptions import CuckooOperationalError
 from lib.cuckoo.common.exceptions import CuckooDependencyError
-from lib.cuckoo.common.objects import File, URL
+from lib.cuckoo.common.objects import File, URL, PCAP
 from lib.cuckoo.common.utils import create_folder, Singleton, classlock, SuperLock
 from lib.cuckoo.common.demux import demux_sample
 
@@ -30,7 +30,7 @@ except ImportError:
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "f111620bb8"
+SCHEMA_VERSION = "3c8bf4133b44"
 TASK_PENDING = "pending"
 TASK_RUNNING = "running"
 TASK_COMPLETED = "completed"
@@ -179,8 +179,7 @@ class Sample(Base):
     sha256 = Column(String(64), nullable=False)
     sha512 = Column(String(128), nullable=False)
     ssdeep = Column(String(255), nullable=True)
-    __table_args__ = Index("hash_index", "md5", "crc32", "sha1",
-                           "sha256", "sha512", unique=True),
+    __table_args__ = Index("md5_index", "md5"), Index("sha1_index", "sha1"), Index("sha256_index", "sha256", unique=True),
 
     def __repr__(self):
         return "<Sample('{0}','{1}')>".format(self.id, self.sha256)
@@ -308,6 +307,8 @@ class Task(Base):
     shrike_sid = Column(Integer(), nullable=True)
 
     parent_id = Column(Integer(), nullable=True)
+
+    __table_args__ = Index("category_index", "category"), Index("status_index", "status"), Index("added_on_index", "added_on"), Index("completed_on_index", "completed_on"),
 
     def to_dict(self):
         """Converts object to dict.
@@ -572,7 +573,7 @@ class Database(object):
         row = None
         try:
             if machine != "":
-                row = session.query(Task).filter_by(status=TASK_PENDING).filter(Machine.name==machine).order_by("priority desc, added_on").first()
+                row = session.query(Task).filter_by(status=TASK_PENDING).filter_by(machine=machine).order_by("priority desc, added_on").first()
             else:
                 row = session.query(Task).filter_by(status=TASK_PENDING).order_by("priority desc, added_on").first()
 
@@ -678,10 +679,12 @@ class Database(object):
         if label and platform:
             # Wrong usage.
             log.error("You can select machine only by label or by platform.")
+            session.close()
             return None
         elif label and tags:
             # Also wrong usage.
             log.error("You can select machine only by label or by tags.")
+            session.close()
             return None
 
         try:
@@ -697,6 +700,7 @@ class Database(object):
             # Check if there are any machines that satisfy the
             # selection requirements.
             if not machines.count():
+                session.close()
                 raise CuckooOperationalError("No machines match selection criteria.")
 
             # Get the first free machine.
@@ -718,6 +722,8 @@ class Database(object):
                 return None
             finally:
                 session.close()
+        else:
+            session.close()
 
         return machine
 
@@ -747,6 +753,8 @@ class Database(object):
                 return None
             finally:
                 session.close()
+        else:
+            session.close()
 
         return machine
 
@@ -855,16 +863,18 @@ class Database(object):
         if not priority:
             priority = 1
 
-        if isinstance(obj, File):
-            file_type = obj.get_type()
-            sample = Sample(md5=obj.get_md5(),
-                            crc32=obj.get_crc32(),
-                            sha1=obj.get_sha1(),
-                            sha256=obj.get_sha256(),
-                            sha512=obj.get_sha512(),
-                            file_size=obj.get_size(),
+        if isinstance(obj, File) or isinstance(obj, PCAP):
+            fileobj = File(obj.file_path)
+            file_type = fileobj.get_type()
+            file_md5 = fileobj.get_md5()
+            sample = Sample(md5=file_md5,
+                            crc32=fileobj.get_crc32(),
+                            sha1=fileobj.get_sha1(),
+                            sha256=fileobj.get_sha256(),
+                            sha512=fileobj.get_sha512(),
+                            file_size=fileobj.get_size(),
                             file_type=file_type,
-                            ssdeep=obj.get_ssdeep())
+                            ssdeep=fileobj.get_ssdeep())
             session.add(sample)
 
             try:
@@ -872,7 +882,7 @@ class Database(object):
             except IntegrityError:
                 session.rollback()
                 try:
-                    sample = session.query(Sample).filter_by(md5=obj.get_md5()).first()
+                    sample = session.query(Sample).filter_by(md5=file_md5).first()
                 except SQLAlchemyError as e:
                     log.debug("Error querying sample for hash: {0}".format(e))
                     session.close()
@@ -892,6 +902,11 @@ class Database(object):
 
             task = Task(obj.file_path)
             task.sample_id = sample.id
+
+            if isinstance(obj, PCAP):
+                # since no VM will operate on this PCAP
+                task.started_on = datetime.now()
+
         elif isinstance(obj, URL):
             task = Task(obj.url)
 
@@ -921,17 +936,17 @@ class Database(object):
                     task.clock = datetime.strptime(clock, "%m-%d-%Y %H:%M:%S")
                 except ValueError:
                     log.warning("The date you specified has an invalid format, using current timestamp.")
-                    task.clock = datetime.now()
+                    task.clock = datetime.utcnow()
             else:
                 task.clock = clock
         elif isinstance(obj, File):
             try:
-                clocktime = datetime.now() + timedelta(days=self.cfg.cuckoo.daydelta)
+                clocktime = datetime.utcnow() + timedelta(days=self.cfg.cuckoo.daydelta)
                 task.clock = clocktime
             except:
                 pass
         else:
-            task.clock = datetime.now()
+            task.clock = datetime.utcnow()
 
         session.add(task)
 
@@ -1015,6 +1030,16 @@ class Database(object):
         return task_ids
 
     @classlock
+    def add_pcap(self, file_path, timeout=0, package="", options="", priority=1,
+                custom="", machine="", platform="", tags=None, memory=False,
+                enforce_timeout=False, clock=None, shrike_url=None, shrike_msg=None, 
+                shrike_sid = None, shrike_refer=None, parent_id=None):
+        return self.add(PCAP(file_path), timeout, package, options, priority,
+                        custom, machine, platform, tags, memory,
+                        enforce_timeout, clock, shrike_url, shrike_msg,
+                        shrike_sid, shrike_refer, parent_id)
+
+    @classlock
     def add_url(self, url, timeout=0, package="", options="", priority=1,
                 custom="", machine="", platform="", tags=None, memory=False,
                 enforce_timeout=False, clock=None, shrike_url=None, shrike_msg=None, 
@@ -1060,6 +1085,8 @@ class Database(object):
             add = self.add_path
         elif task.category == "url":
             add = self.add_url
+        elif task.category == "pcap":
+            add = self.add_pcap
 
         # Change status to recovered.
         session = self.Session()
@@ -1082,7 +1109,34 @@ class Database(object):
         return add(task.target, task.timeout, task.package, task.options,
                    task.priority, task.custom, task.machine, task.platform,
                    tags, task.memory, task.enforce_timeout, task.clock)
+    @classlock
+    def count_matching_tasks(self, category=None,
+                   status=None, not_status=None):
+        """Retrieve list of task.
+        @param category: filter by category
+        @param status: filter by task status
+        @param not_status: exclude this task status from filter
+        @return: number of tasks.
+        """
+        session = self.Session()
+        try:
+            search = session.query(Task)
 
+            if status:
+                search = search.filter_by(status=status)
+            if not_status:
+                search = search.filter(Task.status != not_status)
+            if category:
+                search = search.filter_by(category=category)
+
+            tasks = search.count()
+            return tasks
+        except SQLAlchemyError as e:
+            log.debug("Database error counting tasks: {0}".format(e))
+            return []
+        finally:
+            session.close()
+            
     @classlock
     def list_tasks(self, limit=None, details=False, category=None,
                    offset=None, status=None, sample_id=None, not_status=None,
